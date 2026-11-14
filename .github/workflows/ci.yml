@@ -17,5 +17,5 @@ jobs:
           cache: true
       - run: go test ./...
       - run: go vet ./...
-      - run: go build ./cmd/api
-      - run: go build ./cmd/kubeshield-api
+      - run: go build -o /tmp/kubeshield-api ./cmd/api
+      - run: go build -o /tmp/kubeshield-agent ./cmd/kubeshield-api
