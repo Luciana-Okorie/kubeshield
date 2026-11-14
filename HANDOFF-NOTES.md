@@ -1,4 +1,4 @@
-# KubeShield handoff — 14 November 2026
+# KubeShield handoff
 
 ## Changes prepared in this handoff
 
