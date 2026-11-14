@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kubeshield
+      POSTGRES_USER: kubeshield
+      POSTGRES_PASSWORD: kubeshield
+    ports:
+      - "5437:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kubeshield -d kubeshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  postgres_data:

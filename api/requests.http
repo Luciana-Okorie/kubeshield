@@ -1,0 +1,101 @@
+# Try the KubeShield API from VS Code with the "REST Client" extension
+# (humao.rest-client). Click "Send Request" above each ### block, top to bottom.
+# Start the server first: Run and Debug -> "API (in-memory store)".
+#
+# Pick the "local" environment (bottom-right of VS Code) or edit @host below.
+
+@host = http://127.0.0.1:8110
+@email = you@example.com
+@password = a long passphrase
+
+### Health
+GET {{host}}/healthz
+
+### 1. Sign up. Closed by default: only the very first account on a server is accepted.
+POST {{host}}/v1/auth/signup
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "display_name": "You",
+  "password": "{{password}}",
+  "organization_name": "Acme",
+  "organization_slug": "acme"
+}
+
+### 2. Log in. The token is shown once; later requests pick it up automatically.
+# @name login
+POST {{host}}/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+###
+@token = {{login.response.body.$.token}}
+
+### 3. Who am I, and which organizations am I in?
+# @name me
+GET {{host}}/v1/me
+Authorization: Bearer {{token}}
+
+###
+@orgId = {{me.response.body.$.organizations[0].id}}
+
+### 4. Register a cluster
+# @name cluster
+POST {{host}}/v1/organizations/{{orgId}}/clusters
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "kind-local",
+  "provider": "kind"
+}
+
+###
+@clusterId = {{cluster.response.body.$.id}}
+
+### 5. Queue a scan (only recorded as "queued"; nothing runs it until a later phase)
+POST {{host}}/v1/organizations/{{orgId}}/clusters/{{clusterId}}/scans
+Authorization: Bearer {{token}}
+
+### 6. List the cluster's scans
+GET {{host}}/v1/organizations/{{orgId}}/clusters/{{clusterId}}/scans
+Authorization: Bearer {{token}}
+
+### 7. Create an agent token (shown once)
+# @name agentToken
+POST {{host}}/v1/organizations/{{orgId}}/clusters/{{clusterId}}/agent-tokens
+Authorization: Bearer {{token}}
+
+###
+@agentSecret = {{agentToken.response.body.$.token}}
+
+### 8. Check the agent token works
+GET {{host}}/v1/agent/whoami
+Authorization: Bearer {{agentSecret}}
+
+### 9. Members of the organization (owners and admins only)
+GET {{host}}/v1/organizations/{{orgId}}/members
+Authorization: Bearer {{token}}
+
+### 10. Add someone who already has an account (404 until that person has signed up)
+POST {{host}}/v1/organizations/{{orgId}}/members
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "teammate@example.com",
+  "role": "member"
+}
+
+### 11. What happened? The audit log (owners and admins only)
+GET {{host}}/v1/organizations/{{orgId}}/audit-logs
+Authorization: Bearer {{token}}
+
+### 12. Log out (revokes this session token)
+POST {{host}}/v1/auth/logout
+Authorization: Bearer {{token}}

@@ -1,0 +1,1175 @@
+openapi: 3.0.3
+info:
+  title: KubeShield API
+  version: 0.4.0
+  description: |
+    Central management API for KubeShield. It is read-only with respect to clusters: it never
+    changes a cluster it monitors.
+
+    ## Authentication
+
+    Every endpoint except `/healthz`, `/v1/auth/signup` and `/v1/auth/login` needs a bearer token:
+
+    * **User session tokens** (`ksu_...`) come from `POST /v1/auth/login` and are sent as
+      `Authorization: Bearer <token>`. They expire (default 12 hours) and can be revoked with logout.
+    * **Agent tokens** (`ksa_...`) are created per cluster by an owner or admin and are accepted
+      only on `/v1/agent/*`. The two kinds are not interchangeable.
+
+    Tokens are shown once, when created. The server stores only a SHA-256 hash.
+
+    ## Authorization
+
+    Each user has a role in each organization: `owner`, `admin`, `member` or `viewer`.
+
+    | Action | owner | admin | member | viewer |
+    | --- | :-: | :-: | :-: | :-: |
+    | Read organization, clusters, scans | yes | yes | yes | yes |
+    | Queue a scan | yes | yes | yes | no |
+    | Create clusters, manage agent tokens, read the audit log | yes | yes | no | no |
+    | List, add, change and remove members | yes | members and viewers only | no | no |
+
+    Admins can only add, change and remove **members and viewers**. They cannot create owners or
+    admins and cannot touch existing ones, so an admin cannot escalate anyone (including
+    themselves). An organization always keeps at least one owner.
+
+    ## Tenant isolation
+
+    A caller who is not a member of an organization gets the same `404` as for an organization that
+    does not exist, so IDs cannot be probed across tenants. A member whose role is too low gets `403`.
+
+    ## Rate limits
+
+    Requests are limited per client address. Login and signup have a much lower limit than the rest.
+    A limited request gets `429` with a `Retry-After` header (seconds). The client is the TCP peer,
+    or, when the operator lists trusted proxies, the address those proxies report in
+    `X-Forwarded-For`.
+
+    ## Transport
+
+    The server can serve HTTPS itself (`KUBESHIELD_TLS_CERT_FILE` and `KUBESHIELD_TLS_KEY_FILE`),
+    or sit behind a TLS-terminating proxy. All responses carry `Cache-Control: no-store`,
+    `X-Content-Type-Options: nosniff` and a restrictive Content-Security-Policy.
+servers:
+  - url: http://127.0.0.1:8110
+security:
+  - userToken: []
+tags:
+  - name: Auth
+  - name: Organizations
+  - name: Members
+  - name: Clusters
+  - name: Scans
+  - name: Agent tokens
+  - name: Agent
+  - name: Audit
+paths:
+  /healthz:
+    get:
+      security: []
+      summary: Liveness check
+      description: Reports that the process is serving HTTP. Checks no dependencies.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/auth/signup:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Create an account and its organization
+      description: |
+        Creates a user and a new organization they own. Does not log the user in.
+
+        Signup is closed by default: only the very first account on a server is accepted (decided
+        atomically, so simultaneous attempts cannot both win), then `403 signup_disabled` until the
+        operator sets `KUBESHIELD_ALLOW_SIGNUP=true`. Others join an organization when an owner or
+        admin adds them.
+      operationId: signup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Signup"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignupResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: Signup is closed on this server (`signup_disabled`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Log in
+      description: |
+        Returns a session token. Every failure (unknown email, wrong password, disabled account)
+        gets the same `401 invalid_credentials`, with the same body.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Login"
+      responses:
+        "200":
+          description: Logged in. The token is shown only in this response.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InvalidCredentials"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: Revokes the session token used for this request. Other sessions stay valid.
+      operationId: logout
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/me:
+    get:
+      tags: [Auth]
+      summary: The signed-in user and their organizations
+      operationId: getMe
+      responses:
+        "200":
+          description: The user, with their role in each organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations:
+    get:
+      tags: [Organizations]
+      summary: List my organizations
+      description: Only organizations the caller belongs to.
+      operationId: listOrganizations
+      responses:
+        "200":
+          description: Up to 100 organizations, oldest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Organizations]
+      summary: Create another organization
+      description: The caller becomes its owner.
+      operationId: createOrganization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrganization"
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgMembership"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      tags: [Organizations]
+      summary: Get an organization
+      operationId: getOrganization
+      responses:
+        "200":
+          description: The organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      tags: [Members]
+      summary: List the organization's members
+      description: Owners and admins only. Oldest first, up to 100.
+      operationId: listMembers
+      responses:
+        "200":
+          description: Members with their roles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Members]
+      summary: Add an existing user to the organization
+      description: |
+        Owners can assign any role. Admins can only add members and viewers (`403` otherwise).
+
+        The person must already have an account; there is no email invitation yet. An unknown
+        or disabled address gets `404`, which means a manager can tell whether an address is
+        registered.
+      operationId: addMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddMember"
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/members/{userID}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: userID
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Members]
+      summary: Change a member's role
+      description: |
+        Owners can change anyone. Admins can only change members and viewers, and only to
+        member or viewer. Demoting the last owner is refused with `409 last_owner`.
+        A role change takes effect immediately.
+      operationId: setMemberRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRole"
+      responses:
+        "200":
+          description: Updated membership
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Membership"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LastOwner"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      tags: [Members]
+      summary: Remove a member
+      description: |
+        Same rules as changing a role. The person loses access at once, even though their
+        login session stays valid for their other organizations. Removing the last owner is
+        refused with `409 last_owner`.
+      operationId: removeMember
+      responses:
+        "204":
+          description: Removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LastOwner"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/audit-logs:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      tags: [Audit]
+      summary: Read the organization's audit log
+      description: |
+        Owners and admins only. Newest first, up to 100 entries. Entries never contain passwords,
+        tokens or hashes. Sign-in and sign-out events belong to a person rather than an
+        organization, so they are recorded but not listed here.
+      operationId: listAuditLogs
+      responses:
+        "200":
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/clusters:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      tags: [Clusters]
+      summary: List an organization's clusters
+      operationId: listClusters
+      responses:
+        "200":
+          description: Up to 100 clusters, oldest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Clusters]
+      summary: Register a cluster
+      description: |
+        Owners and admins only. Creates the cluster in the `pending` state. It becomes
+        `connected` once an agent reports in (a later phase).
+      operationId: createCluster
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCluster"
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/clusters/{clusterID}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - $ref: "#/components/parameters/ClusterID"
+    get:
+      tags: [Clusters]
+      summary: Get a cluster
+      operationId: getCluster
+      responses:
+        "200":
+          description: The cluster
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/clusters/{clusterID}/scans:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - $ref: "#/components/parameters/ClusterID"
+    get:
+      tags: [Scans]
+      summary: List a cluster's scans
+      operationId: listScans
+      responses:
+        "200":
+          description: Up to 100 scans, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Scans]
+      summary: Queue a scan
+      description: |
+        Owners, admins and members. Records a scan in the `queued` state and who requested it.
+        Nothing executes it yet; scan execution is a later phase. The request has no body.
+      operationId: createScan
+      responses:
+        "201":
+          description: Queued
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scan"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/scans/{scanID}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: scanID
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Scans]
+      summary: Get a scan
+      operationId: getScan
+      responses:
+        "200":
+          description: The scan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scan"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/clusters/{clusterID}/agent-tokens:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - $ref: "#/components/parameters/ClusterID"
+    get:
+      tags: [Agent tokens]
+      summary: List a cluster's agent tokens
+      description: Owners and admins only. Shows the public prefix and usage, never the secret.
+      operationId: listAgentTokens
+      responses:
+        "200":
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTokenList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Agent tokens]
+      summary: Create an agent token
+      description: |
+        Owners and admins only. The token is returned in this response and never again.
+        Give it to the agent as a Kubernetes Secret, not in source control.
+      operationId: createAgentToken
+      responses:
+        "201":
+          description: Created
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTokenCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/organizations/{orgID}/clusters/{clusterID}/agent-tokens/{tokenID}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - $ref: "#/components/parameters/ClusterID"
+      - name: tokenID
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [Agent tokens]
+      summary: Revoke an agent token
+      description: Owners and admins only. Takes effect immediately. Revoking twice is fine.
+      operationId: revokeAgentToken
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/agent/whoami:
+    get:
+      tags: [Agent]
+      security:
+        - agentToken: []
+      summary: Which cluster does this agent token speak for?
+      description: |
+        The first endpoint behind agent authentication. Lets an agent confirm that its token
+        works. It also records the token's `last_used_at`.
+      operationId: agentWhoAmI
+      responses:
+        "200":
+          description: The agent's identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentIdentity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+components:
+  securitySchemes:
+    userToken:
+      type: http
+      scheme: bearer
+      description: Session token from `POST /v1/auth/login` (prefix `ksu_`)
+    agentToken:
+      type: http
+      scheme: bearer
+      description: Per-cluster agent token (prefix `ksa_`)
+  parameters:
+    OrgID:
+      name: orgID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ClusterID:
+      name: clusterID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Body is not a single valid JSON object, or has unknown fields (`invalid_json`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing, malformed, unknown, expired or revoked token (`unauthorized`). Carries `WWW-Authenticate`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidCredentials:
+      description: Wrong email or password (`invalid_credentials`). The same for every cause.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The caller is a member of the organization but their role does not allow this (`forbidden`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: |
+        Resource does not exist, belongs to an organization the caller is not in, or the ID is malformed (`not_found`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LastOwner:
+      description: The change would leave the organization without an owner (`last_owner`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: A resource with that unique value already exists (`conflict`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooLarge:
+      description: Body exceeds 1 MiB (`body_too_large`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Validation:
+      description: Well-formed JSON with an unacceptable value (`validation_failed`); `field` names it
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests (`rate_limited`)
+      headers:
+        Retry-After:
+          description: Seconds until the client may retry
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: kubeshield-api
+        version:
+          type: string
+          example: dev
+    Organization:
+      type: object
+      required: [id, name, slug, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateOrganization:
+      type: object
+      additionalProperties: false
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Surrounding whitespace is trimmed
+        slug:
+          type: string
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+    Cluster:
+      type: object
+      required: [id, organization_id, name, provider, kubernetes_version, status, last_seen_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        provider:
+          $ref: "#/components/schemas/Provider"
+        kubernetes_version:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, connected, disconnected]
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Provider:
+      type: string
+      description: Matters for advisory matching. A GKE bulletin only applies to `gke`.
+      enum: [gke, eks, aks, kind, self_managed, unknown]
+    CreateCluster:
+      type: object
+      additionalProperties: false
+      required: [name, provider]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Unique within the organization
+        provider:
+          $ref: "#/components/schemas/Provider"
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - invalid_json
+                - body_too_large
+                - validation_failed
+                - unauthorized
+                - invalid_credentials
+                - forbidden
+                - not_found
+                - conflict
+                - last_owner
+                - signup_disabled
+                - rate_limited
+                - internal
+            message:
+              type: string
+            field:
+              type: string
+              description: Present on `validation_failed`
+    Role:
+      type: string
+      enum: [owner, admin, member, viewer]
+    User:
+      type: object
+      required: [id, email, display_name, created_at]
+      description: The password hash is never returned.
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          description: Stored lowercase
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    Signup:
+      type: object
+      additionalProperties: false
+      required: [email, display_name, password, organization_name, organization_slug]
+      properties:
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          description: Length is the only rule. Stored as a salted PBKDF2-SHA256 hash.
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        organization_slug:
+          type: string
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+    SignupResult:
+      type: object
+      required: [user, organization]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        organization:
+          $ref: "#/components/schemas/Organization"
+    Login:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+    LoginResult:
+      type: object
+      required: [token, expires_at, user]
+      properties:
+        token:
+          type: string
+          description: Bearer token, `ksu_` plus 43 characters. Shown once.
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: "#/components/schemas/User"
+    OrgMembership:
+      description: An organization as seen by one of its members
+      allOf:
+        - $ref: "#/components/schemas/Organization"
+        - type: object
+          required: [role]
+          properties:
+            role:
+              $ref: "#/components/schemas/Role"
+    Me:
+      type: object
+      required: [user, organizations]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        organizations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgMembership"
+    Member:
+      type: object
+      required: [user_id, email, display_name, role, created_at]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          type: string
+          format: date-time
+    MemberList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Member"
+    Membership:
+      type: object
+      required: [organization_id, user_id, role, created_at]
+      properties:
+        organization_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          type: string
+          format: date-time
+    AddMember:
+      type: object
+      additionalProperties: false
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          $ref: "#/components/schemas/Role"
+    SetRole:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+    OrganizationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgMembership"
+    ClusterList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cluster"
+    Scan:
+      type: object
+      required: [id, organization_id, cluster_id, status, requested_by, error, created_at, started_at, finished_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        cluster_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, canceled]
+        requested_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: The user who queued it. Null if that user was later deleted.
+        error:
+          type: string
+          nullable: true
+          description: Only set when status is `failed`
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+    ScanList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scan"
+    AgentToken:
+      type: object
+      required: [id, cluster_id, token_prefix, created_at, last_used_at, revoked_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        cluster_id:
+          type: string
+          format: uuid
+        token_prefix:
+          type: string
+          example: ksa_Ab3dE9
+          description: Public label to tell tokens apart. Not enough to use the token.
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+    AgentTokenCreated:
+      allOf:
+        - $ref: "#/components/schemas/AgentToken"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The full secret, `ksa_` plus 43 characters. Shown once.
+    AgentTokenList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentToken"
+    AgentIdentity:
+      type: object
+      required: [cluster_id, organization_id]
+      properties:
+        cluster_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+    AuditEntry:
+      type: object
+      required: [id, organization_id, actor_user_id, actor_type, action, metadata, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        organization_id:
+          type: string
+          format: uuid
+          nullable: true
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        actor_type:
+          type: string
+          enum: [user, agent, system]
+        action:
+          type: string
+          example: cluster.created
+        target_type:
+          type: string
+        target_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Never contains secrets
+        ip:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    AuditList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"

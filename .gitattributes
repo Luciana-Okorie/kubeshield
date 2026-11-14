@@ -1,0 +1,10 @@
+# Keep line endings as LF everywhere, including on Windows checkouts. The SQL migrations are
+# embedded into the binary, so CRLF conversion would change the bytes that get applied.
+* text=auto eol=lf
+*.go text eol=lf
+*.sql text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.http text eol=lf
+*.sh text eol=lf

@@ -1,0 +1,27 @@
+# Local development database only. The API itself runs with `go run ./cmd/api`.
+#
+#   docker compose up -d postgres
+#
+# The credentials below are for a throwaway local database bound to localhost.
+# Never reuse them anywhere else.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kubeshield-postgres
+    environment:
+      POSTGRES_USER: kubeshield
+      POSTGRES_PASSWORD: kubeshield_dev_only
+      POSTGRES_DB: kubeshield
+    ports:
+      # Host port 5460 avoids the Postgres ports other local projects already use.
+      - "127.0.0.1:5460:5432"
+    volumes:
+      - kubeshield-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kubeshield -d kubeshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  kubeshield-pgdata:

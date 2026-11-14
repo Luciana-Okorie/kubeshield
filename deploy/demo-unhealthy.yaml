@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeshield-demo
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failing-app
+  namespace: kubeshield-demo
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "exit 1"]
+      securityContext:
+        privileged: true
